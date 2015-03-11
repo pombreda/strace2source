@@ -1,48 +1,93 @@
 import re
 import sys
 
+from syscall import *
+from file import *
+
 __author__ = 'Jungsik Choi'
-
-class Syscall:
-    def __init__(self, _line, _tid, _time, _name, _args_list, _return_value):
-        self.line = _line
-        self.tid = _tid
-        self.time = _time
-        self.name = _name
-        self.args_list = _args_list
-        self.return_value = _return_value
-
-class File:
-    def __init__(self, _fd, _path, _permission):
-        self.fd = _fd
-        self.path = _path
-        self.permission = _permission
-        self.offset = 0
-        self.access_history = []
 
 class Translate:
     def __init__(self):
         self.logfile = open('strace2source.log', 'w')
+        self.manager = Manager(self)
 
     def __del__(self):
         self.logfile.close()
+        del self.manager
 
     def log(self, _message):
         message = str(_message) + '\n'
         self.logfile.write(message)
 
+    def file_open (self, fd, filename, permission):
+        pass
+
     def open_syscall(self, syscall):
-        self.log('[open] ')
+        self.log('\n[open] ')
+        fd = int(syscall.return_value)
+        path = syscall.args_list[0].strip('"')
+        oflag = syscall.args_list[1].strip()
+        self.log('original=' + syscall.line)
+        self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (oflag)' + oflag + '.')
+        new_file = File(fd, path, oflag)
+        self.manager.add_file(syscall, new_file)
+
+    def read_syscall(self, syscall):
+        self.log('\n[read] ')
         self.log(syscall.args_list)
 
-    def close_syscall(self, syscall):
-        self.log('[close] ')
+    def pread_syscall(self, syscall):
+        self.log('\n[pread] ')
         self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+    def write_syscall(self, syscall):
+        self.log('\n[write] ')
+        self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+    def pwrite_syscall(self, syscall):
+        self.log('\n[pwrite] ')
+        self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+    def lseek_syscall(self, syscall):
+        self.log('\n[lseek] ')
+        self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+    def close_syscall(self, syscall):
+        self.log('\n[close] ')
+        self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+        if syscall.return_value == '0':
+            try:
+                compile = re.compile(r'(?P<fd>\d+)(?P<path>\<.+\>)')
+                match = compile.match(syscall.args_list[0])
+                fd = match.group('fd')
+                path = match.group('path')
+                path = path.strip('<>')
+                self.log('fd=' + fd)
+                self.log('path=' + path)
+            except:
+                self.log("[Exception] I can't find the fd/path in this syscall : " + syscall.line)
+                return
+
+        else:
+            self.log('[Exception] This close is failed : ' + syscall.line)
+
+    def clone_syscall(self, syscall):
+        self.log('\n[close] ')
+        self.log(syscall.args_list)
+        self.log(syscall.return_value)
+
+    # The end of Translate class
 
 def main():
     translate = Translate()
     unfinished_syscall_dic = {}
-    interested_syscalls = ['open', 'read', 'pread', 'write', 'pwrite', 'close', 'lseek']
+    interested_syscalls = ['open', 'read', 'pread', 'write', 'pwrite', 'lseek', 'close', 'clone']
 
     strace_file_path = raw_input("strace file path? (default: strace/fileserver.strace) : ")
     if strace_file_path == '':
@@ -83,7 +128,7 @@ def main():
             print str(completion_rate) + '%'
             completion_rate = completion_rate + 10
 
-        strace_line = line
+        strace_line = line.strip()
 
         # get TID info
         try:
@@ -162,8 +207,28 @@ def main():
 
         if syscall.name == 'open':
             translate.open_syscall(syscall)
+
+        elif syscall.name == 'read':
+            translate.read_syscall(syscall)
+
+        elif syscall.name == 'pread':
+            translate.pread_syscall(syscall)
+
+        elif syscall.name == 'write':
+            translate.write_syscall(syscall)
+
+        elif syscall.name == 'pwrite':
+            translate.pwrite_syscall(syscall)
+
+        elif syscall.name == 'lseek':
+            translate.lseek_syscall(syscall)
+
         elif syscall.name == 'close':
             translate.close_syscall(syscall)
+
+        elif syscall.name == 'clone':
+            translate.clone_syscall(syscall)
+
         else:
             translate.log("[Exception] unexpected syscall : " + strace_line)
 
