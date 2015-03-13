@@ -3,6 +3,7 @@ import sys
 
 from syscall import *
 from file import *
+from generator import *
 
 __author__ = 'Jungsik Choi'
 
@@ -10,17 +11,17 @@ class Translate:
     def __init__(self):
         self.logfile = open('strace2source.log', 'w')
         self.manager = Manager(self)
+        self.source_generator = SourceGenerator()
+        self.source_generator.prepare()
 
     def __del__(self):
         self.logfile.close()
         del self.manager
+        del self.source_generator
 
     def log(self, _message):
         message = str(_message) + '\n'
         self.logfile.write(message)
-
-    def file_open (self, fd, filename, permission):
-        pass
 
     def open_syscall(self, syscall):
         self.log('\n[open] ')
@@ -29,8 +30,11 @@ class Translate:
         oflag = syscall.args_list[1].strip()
         self.log('original=' + syscall.line)
         self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (oflag)' + oflag + '.')
+
         new_file = File(fd, path, oflag)
-        self.manager.add_file(syscall, new_file)
+        index = self.manager.add_file(syscall, new_file)
+        self.source_generator.open(path, oflag, index)
+
 
     def read_syscall(self, syscall):
         self.log('\n[read] ')
@@ -53,23 +57,25 @@ class Translate:
 
     def lseek_syscall(self, syscall):
         self.log('\n[lseek] ')
-        self.log(syscall.args_list)
-        self.log(syscall.return_value)
+        self.log('original=' + syscall.line)
+
+        cur_offset = int(syscall.return_value)
+        if cur_offset > -1:
+            fd, path = self.get_fd_and_path(syscall.args_list[0])
+            self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (new_offset)' + str(cur_offset))
+            self.manager.change_file_offset(syscall, fd, path, cur_offset)
+        else:
+            self.log("[Exception] This lseek syscall is failed : " + syscall.line)
 
     def close_syscall(self, syscall):
         self.log('\n[close] ')
-        self.log(syscall.args_list)
-        self.log(syscall.return_value)
 
         if syscall.return_value == '0':
             try:
-                compile = re.compile(r'(?P<fd>\d+)(?P<path>\<.+\>)')
-                match = compile.match(syscall.args_list[0])
-                fd = match.group('fd')
-                path = match.group('path')
-                path = path.strip('<>')
-                self.log('fd=' + fd)
-                self.log('path=' + path)
+                fd, path = self.get_fd_and_path(syscall.args_list[0])
+                self.log('original=' + syscall.line)
+                self.log('analysis=(fd)' + str(fd) + ', (path)' + path)
+                self.manager.sub_file(syscall, fd, path)
             except:
                 self.log("[Exception] I can't find the fd/path in this syscall : " + syscall.line)
                 return
@@ -81,6 +87,22 @@ class Translate:
         self.log('\n[close] ')
         self.log(syscall.args_list)
         self.log(syscall.return_value)
+
+    def get_fd_and_path(self, _string):
+        """
+
+        :rtype : object
+        """
+        try:
+            compile = re.compile(r'(?P<fd>\d+)(?P<path>\<.+\>)')
+            match = compile.match(_string)
+            fd = match.group('fd')
+            path = match.group('path')
+            path = path.strip('<>')
+            return int(fd), path
+        except:
+            self.log("[Exception] I can't find the fd/path in this string : " + _string)
+            return -1, -1
 
     # The end of Translate class
 
