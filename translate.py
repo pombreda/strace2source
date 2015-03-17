@@ -13,32 +13,56 @@ class Translate:
         self.manager = Manager(self)
         self.source_generator = SourceGenerator()
         self.source_generator.prepare()
+        self.dataset_path = ''
+        self.test_dataset_path = ''
 
-    def __del__(self):
-        self.logfile.close()
-        del self.manager
+    def finish(self):
+        self.source_generator.finish(self.manager.max_nr_fds)
         del self.source_generator
+
+        self.manager.finish()
+        del self.manager
+
+        self.logfile.close()
 
     def log(self, _message):
         message = str(_message) + '\n'
         self.logfile.write(message)
 
+    def get_testset_path(self, _path):
+        path = _path.replace(self.dataset_path, self.test_dataset_path)
+        return path
+
     def open_syscall(self, syscall):
         self.log('\n[open] ')
         fd = int(syscall.return_value)
         path = syscall.args_list[0].strip('"')
+        path = self.get_testset_path(path)
         oflag = syscall.args_list[1].strip()
         self.log('original=' + syscall.line)
         self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (oflag)' + oflag + '.')
 
         new_file = File(fd, path, oflag)
         index = self.manager.add_file(syscall, new_file)
-        self.source_generator.open(path, oflag, index)
-
+        if index > -1:
+            self.source_generator.open(path, oflag, index)
+        else:
+            self.log('[Exception] ...')
 
     def read_syscall(self, syscall):
         self.log('\n[read] ')
-        self.log(syscall.args_list)
+        fd, path = self.get_fd_and_path(syscall.args_list[0])
+        read_size = int(syscall.return_value)
+        request_size = int(syscall.args_list[2].strip())
+
+        self.log('original=' + syscall.line)
+        self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (request_size)' + str(request_size) + ', (read_size)' + str(read_size))
+        index, cur_offset = self.manager.read_file(syscall, fd, path, request_size, read_size)
+
+        if index > -1:
+            self.source_generator.read(index, cur_offset, read_size)
+        else:
+            self.log('[Exception] ...')
 
     def pread_syscall(self, syscall):
         self.log('\n[pread] ')
@@ -49,6 +73,19 @@ class Translate:
         self.log('\n[write] ')
         self.log(syscall.args_list)
         self.log(syscall.return_value)
+
+        fd, path = self.get_fd_and_path(syscall.args_list[0])
+        write_size = int(syscall.return_value)
+        request_size = int(syscall.args_list[2].strip())
+
+        self.log('original=' + syscall.line)
+        self.log('analysis=(fd)' + str(fd) + ', (path)' + path + ', (request_size)' + str(request_size) + ', (write_size)' + str(write_size))
+        index, cur_offset = self.manager.write_file(syscall, fd, path, request_size, write_size)
+
+        if index > -1:
+            self.source_generator.write(index, cur_offset, write_size)
+        else:
+            self.log('[Exception] ...')
 
     def pwrite_syscall(self, syscall):
         self.log('\n[pwrite] ')
@@ -75,9 +112,16 @@ class Translate:
                 fd, path = self.get_fd_and_path(syscall.args_list[0])
                 self.log('original=' + syscall.line)
                 self.log('analysis=(fd)' + str(fd) + ', (path)' + path)
-                self.manager.sub_file(syscall, fd, path)
+                index = self.manager.sub_file(syscall, fd, path)
+                if index > -1:
+                    self.source_generator.close(index)
+                else:
+                    self.log('[Exception] There is no previous fd')
             except:
-                self.log("[Exception] I can't find the fd/path in this syscall : " + syscall.line)
+                self.log("[Exception] Translate.close_syscall")
+                self.log("\tI can't find the fd/path in this syscall")
+                self.log("\tsyscall : " + syscall.line)
+                self.log(sys.exc_info()[0])
                 return
 
         else:
@@ -89,19 +133,17 @@ class Translate:
         self.log(syscall.return_value)
 
     def get_fd_and_path(self, _string):
-        """
-
-        :rtype : object
-        """
         try:
             compile = re.compile(r'(?P<fd>\d+)(?P<path>\<.+\>)')
             match = compile.match(_string)
             fd = match.group('fd')
             path = match.group('path')
             path = path.strip('<>')
+            path = self.get_testset_path(path)
             return int(fd), path
         except:
             self.log("[Exception] I can't find the fd/path in this string : " + _string)
+            self.log(sys.exc_info()[0])
             return -1, -1
 
     # The end of Translate class
@@ -115,11 +157,15 @@ def main():
     if strace_file_path == '':
         strace_file_path = 'strace/fileserver.strace'
 
-    dataset_path = raw_input("dataset path? (default: /mnt/tmpfs) : ")
-    if dataset_path == '':
-        dataset_path = '/mnt/tmpfs'
+    translate.dataset_path = raw_input("dataset path? (default: /mnt/tmpfs) : ")
+    if translate.dataset_path == '':
+        translate.dataset_path = '/mnt/tmpfs'
 
-    buf = raw_input("Do you translate only syscalls associated with the dataset? (default: yes) : ")
+    translate.test_dataset_path = raw_input("test dataset path? (default: /mnt/tmpfs/testset) : ")
+    if translate.test_dataset_path == '':
+        translate.test_dataset_path = '/mnt/tmpfs/testset'
+
+    buf = raw_input("Do you want to translate only syscalls associated with the dataset? (default: yes) : ")
     if buf == '':
         buf = 'yes'
 
@@ -208,7 +254,7 @@ def main():
 
             if only_dataset:
                 try:
-                    ret = args.index(dataset_path)
+                    ret = args.index(translate.dataset_path)
                 except:
                     continue
 
@@ -227,6 +273,7 @@ def main():
 
         syscall = Syscall(strace_line, tid, time, name, args_list, return_value)
 
+        # classify system calls
         if syscall.name == 'open':
             translate.open_syscall(syscall)
 
@@ -256,6 +303,7 @@ def main():
 
         # the end of for loop
 
+    translate.finish()
     del translate
     print 'Translation is done!!'
     # the end of main() function
